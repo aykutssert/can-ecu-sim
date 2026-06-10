@@ -1,0 +1,29 @@
+# Build output
+build/
+out/
+cmake-build-*/
+
+# Compiled artifacts
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+*.a
+*.so
+*.dylib
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# QEMU
+*.qcow2

@@ -1,0 +1,66 @@
+# Reproducible dev environment for can-ecu-sim.
+#
+# Why a VM at all: SocketCAN's vcan (virtual CAN) requires a Linux kernel
+# built with CONFIG_CAN_VCAN. Docker Desktop for Mac uses LinuxKit, which is
+# built without CAN support, so `modprobe vcan` fails there. Ubuntu's
+# standard kernel ships vcan in the linux-modules-extra package, so a real
+# Ubuntu VM (via Lima/QEMU) is the simplest working setup on macOS.
+#
+# Usage:
+#   limactl start --name=can-dev lima/can-dev.yaml
+#   limactl shell can-dev
+#   cd ~/can-ecu-sim   (mounted from the repo, writable)
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+
+mounts:
+  - location: "~/Desktop/can-ecu-sim"
+    mountPoint: "{{.Home}}/can-ecu-sim"
+    writable: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      apt-get update
+      apt-get install -y build-essential cmake gdb can-utils "linux-modules-extra-$(uname -r)"
+  - mode: system
+    script: |
+      #!/bin/bash
+      # Make vcan0 available on every boot.
+      set -eux -o pipefail
+      echo vcan > /etc/modules-load.d/vcan.conf
+      modprobe vcan
+      cat > /etc/systemd/network/20-vcan0.netdev <<EOF
+      [NetDev]
+      Name=vcan0
+      Kind=vcan
+      EOF
+      cat > /etc/systemd/network/20-vcan0.network <<EOF
+      [Match]
+      Name=vcan0
+
+      [Link]
+      RequiredForOnline=no
+      EOF
+      systemctl enable systemd-networkd
+      systemctl restart systemd-networkd
+      ip link add dev vcan0 type vcan 2>/dev/null || true
+      ip link set up vcan0
+
+probes:
+  - description: "vcan0 is up"
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      ip link show vcan0 | grep -q "UP"
+    hint: "vcan0 did not come up. Check provisioning logs with `limactl show-ssh can-dev` then journalctl."
