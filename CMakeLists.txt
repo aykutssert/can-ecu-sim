@@ -14,3 +14,4 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 enable_testing()
 
 add_subdirectory(can-bus)
+add_subdirectory(monitor-gui/bridge)

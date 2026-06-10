@@ -6,7 +6,7 @@ Simulated in-vehicle CAN bus network with Zephyr RTOS-based ECU firmware - explo
 
 Modern vehicles are networks of small computers (ECUs) talking to each other over CAN bus - engine control, braking, climate, infotainment, all exchanging messages on a shared network with strict timing requirements.
 
-This project builds that world from scratch: a CAN bus simulation layer, and ECU firmware running on an RTOS that produces, consumes, and reacts to CAN messages under real-time constraints. The goal is to understand and demonstrate the core problems of in-vehicle embedded software: message framing, scheduling, timing guarantees, and concurrency - not to build a toy CRUD app with a "vehicle" theme.
+This project builds that world from scratch: a CAN bus simulation layer, ECU firmware running on an RTOS that produces, consumes, and reacts to CAN messages under real-time constraints, and a native GUI for live monitoring. The focus is on the core problems of in-vehicle embedded software: message framing, scheduling, timing guarantees, and concurrency.
 
 ## Architecture
 
@@ -19,15 +19,16 @@ This project builds that world from scratch: a CAN bus simulation layer, and ECU
 +----------------+        +----------------+        +----------------+
                                   |
                                   v
-                         +-----------------+
-                         | Monitor/Logger  |
-                         | (Dear ImGui GUI)|
-                         +-----------------+
+                         +-----------------+        +-----------------+
+                         | TCP Bridge      | <----> | Monitor GUI     |
+                         | (Lima VM,       |  TCP   | (Dear ImGui,    |
+                         |  vcan0 -> lines)|        |  macOS native)  |
+                         +-----------------+        +-----------------+
 ```
 
 - **CAN Bus Simulator**: virtual message bus, frame format, multiple nodes publishing/subscribing
 - **ECU Firmware**: Zephyr RTOS tasks (sensor read, control loop, CAN tx/rx) with priority scheduling. Two build targets: `native_sim` (CAN tx/rx tasks, connected to vcan0 via Zephyr's native CAN driver) and `qemu_cortex_m3` (scheduler/timing demo under real emulation)
-- **Monitor GUI**: real-time view of CAN traffic and ECU state (Dear ImGui)
+- **Monitor GUI**: real-time view of CAN traffic and ECU state (Dear ImGui), running natively on macOS. A small TCP bridge (`monitor-gui/bridge`, runs in the Lima VM) reads `vcan0` and streams `ID#HEXDATA` lines over TCP through Lima's automatic port forwarding to the macOS GUI.
 
 ## Tech Stack
 
@@ -36,8 +37,8 @@ This project builds that world from scratch: a CAN bus simulation layer, and ECU
 - **Emulation**: QEMU (`qemu_cortex_m3`, for the scheduling/timing demo)
 - **Bus simulation**: Linux SocketCAN (vcan)
 - **Build**: CMake
-- **GUI**: Dear ImGui
-- **Platform**: macOS (host) + Lima Linux VM (build/run target, see Development Environment)
+- **GUI**: Dear ImGui + GLFW + OpenGL3 (native macOS app, FetchContent for ImGui)
+- **Platform**: macOS (host, runs the GUI) + Lima Linux VM (bus simulator, ECU firmware, TCP bridge)
 
 ## Development Environment
 
@@ -58,6 +59,29 @@ limactl stop can-dev
 limactl delete can-dev
 ```
 
+### Running the Monitor GUI (Phase 3)
+
+In the Lima VM, build and run the bridge against `vcan0`:
+
+```sh
+cmake -S . -B build && cmake --build build -j4
+./build/monitor-gui/bridge/can_monitor_bridge vcan0 35000
+```
+
+(Optionally also run `./ecu-firmware/build-native/zephyr/zephyr.exe --can-if=vcan0`
+to generate live traffic, see Phase 2.)
+
+On macOS, build and run the GUI (requires `cmake`, `glfw` - `brew install glfw`):
+
+```sh
+cd monitor-gui/app
+cmake -S . -B build && cmake --build build -j4
+./build/can_monitor_gui 35000
+```
+
+The GUI connects to `127.0.0.1:35000`, which Lima forwards to the bridge's
+listen socket inside the VM.
+
 ## Decisions
 
 Architectural choices get recorded here once made, with the reason. Keeps the rationale visible instead of buried in commit history.
@@ -67,6 +91,7 @@ Architectural choices get recorded here once made, with the reason. Keeps the ra
 | RTOS | Zephyr | Industrial automotive RTOS (used by Bosch, NXP, Nordic), not a teaching toy like the bare-metal alternatives. Has a built-in CAN subsystem, active QEMU board support, and a native Linux simulator target. |
 | RTOS <-> CAN bus integration | `native_sim` board with `CONFIG_CAN_NATIVE_LINUX` (socketcan-native-sim snippet), connected to the same `vcan0` as Phase 1 | QEMU's CAN controller emulation (SJA1000/Kvaser PCI via `can-host-socketcan`) is x86-PCI-only with no confirmed Zephyr driver - too fragile to build on. Zephyr's native_sim CAN driver is official, documented, and binds directly to a host SocketCAN interface, so the firmware talks to the exact same bus as the Phase 1 tools. The QEMU target (`qemu_cortex_m3`) is kept for what it's actually good at: demonstrating RTOS scheduling/timing under real cross-compiled emulation, without CAN. |
 | Bus simulation backend | Linux SocketCAN (vcan) inside a Lima VM (Ubuntu, standard kernel) | Real Linux CAN stack, compatible with `can-utils`. Docker Desktop was ruled out: its LinuxKit kernel is built without `CONFIG_CAN_VCAN`, so `modprobe vcan` fails. Ubuntu's generic kernel ships `vcan` as a module. Lima also gives a real QEMU-backed Linux VM, reusable groundwork for Phase 2. |
+| Monitor GUI runs on macOS, not in the Lima VM | A small TCP bridge process in the Lima VM forwards `vcan0` traffic as text lines; the GUI is a native macOS app connecting to `127.0.0.1:<port>` | Dear ImGui + GLFW + OpenGL need a real display; the Lima VM is headless. Verified first that Lima auto-forwards VM-bound TCP ports to macOS `127.0.0.1` (critical assumption, checked before writing any GUI code) - this makes the split low-risk. |
 
 ## Roadmap
 
@@ -85,8 +110,8 @@ Architectural choices get recorded here once made, with the reason. Keeps the ra
 - [x] Demonstrate priority scheduling / timing behavior under load (qemu_cortex_m3)
 
 ### Phase 3 - Monitor GUI
-- [ ] Dear ImGui app showing live CAN traffic
-- [ ] ECU state visualization (task states, message rates)
+- [x] Dear ImGui app showing live CAN traffic
+- [x] ECU state visualization (task states, message rates)
 
 ## Success Criteria
 
@@ -129,6 +154,33 @@ expected.
   the same host (native_sim); only the scheduling demo runs as cross-compiled
   firmware under emulation.
 
+## Phase 3 Results
+
+`monitor-gui/bridge` (Lima VM) opens `vcan0` and a TCP listen socket; on connect
+it streams every frame as `ID#HEXDATA\n`. `monitor-gui/app` (macOS) connects to
+that socket through Lima's port forwarding, parses the stream on a background
+thread, and renders:
+
+- Connection status (connected / retrying)
+- "ECU State": live decode of `0x100` (sensor counter, little-endian uint16)
+  and `0x200` (actuator ON/OFF)
+- A live traffic table (ID, DLC, data bytes, frame count, rate in Hz) for every
+  CAN ID seen
+
+End-to-end run: `sensor_node` (native_sim) + `can_monitor_bridge` in the Lima
+VM, `can_monitor_gui` on macOS connected to `127.0.0.1:35000`. The GUI showed
+`connected=1` and the `0x100` row updating at the firmware's ~100ms tx rate
+with an increasing frame count.
+
+**Limitations:**
+- `can_monitor_bridge` serves one client at a time and detects a dropped
+  client lazily (only on the next failed `send()`); reconnecting quickly after
+  killing the GUI can leave stale half-closed sockets for a short while. Not
+  an issue for normal single-GUI use.
+- The `0x200` actuator row only populates once something sends a `200#01` /
+  `200#00` frame on the bus (e.g. via `can_send`, see Phase 2 Results) -
+  `sensor_node` only consumes it, it does not produce it.
+
 ## Status
 
-Phase 1 - done. Phase 2 - done. Phase 3 (Monitor GUI) - next.
+Phase 1 - done. Phase 2 - done. Phase 3 - done.
