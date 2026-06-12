@@ -28,3 +28,8 @@ Makefile
 
 # QEMU
 *.qcow2
+
+# Agent instructions (local only)
+CLAUDE.md
+AGENTS.md
+ecu-firmware/AGENTS.md
